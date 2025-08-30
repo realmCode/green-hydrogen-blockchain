@@ -28,7 +28,11 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.exceptions import InvalidSignature
 
 
-from utils import _signed_raw_bytes, derive_onchain_block_id
+from utils import _signed_raw_bytes, derive_onchain_block_id, _norm0x
+###################### phase 2
+from phase2.smt_state import DEFAULTS, build_state_root, prove_account, verify_account  # :contentReference[oaicite:4]{index=4}
+from web3 import Web3
+import os, json, hashlib
 # ---------------- Config ----------------
 load_dotenv()
 MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
@@ -52,6 +56,16 @@ db.production_events.create_index([("electrolyzer_id", ASCENDING), ("start_time"
 db.credits.create_index([("owner_account_id", ASCENDING), ("status", ASCENDING)])
 db.ledger_txs.create_index([("block_id", ASCENDING), ("created_at", ASCENDING)])
 db.blocks.create_index([("created_at", ASCENDING)])
+
+def _fetch_balances():
+    agg = db.credits.aggregate([
+        {"$match": {"status": {"$ne": "retired"}}},
+        {"$group": {"_id": "$owner_account_id", "g": {"$sum": "$amount_g"}}}
+    ])
+    balances = {}
+    for row in agg:
+        balances[str(row["_id"])] = int(row["g"])
+    return balances
 
 app = Flask(__name__)
 
@@ -726,5 +740,56 @@ def get_tx_proof(tx_hash):
         "contract_address": block.get("contract_address"),
         "chain": block.get("chain", "sepolia")
     })
+    
+    
+    
+############## account balance proof
+@app.get("/api/v2/state/root")
+def v2_state_root():
+    balances = _fetch_balances()  # :contentReference[oaicite:5]{index=5}
+    root_hex = build_state_root(balances)  # "0x..." :contentReference[oaicite:6]{index=6}
+    return j({
+        "state_root": root_hex,
+        "hash_algo": "sha256",
+        "tree": "Sparse Merkle Tree (binary, 256-depth)",
+        "leaf_rule": 'H(0x00 || uint256(balance_g))',
+        "node_rule": 'H(0x01 || left || right)',
+        "key_rule": 'sha256(account_id)',
+        "created_at": datetime.utcnow().isoformat() + "Z"
+    })
+
+@app.get("/api/v2/state/proof/<account_id>")
+def v2_state_proof(account_id):
+    balances = _fetch_balances()
+    leaf_hex, proof, root_hex = prove_account(balances, account_id)  # :contentReference[oaicite:7]{index=7}
+    ok_local = verify_account(account_id, int(balances.get(account_id, 0)), leaf_hex, proof, root_hex)  # :contentReference[oaicite:8]{index=8}
+    return j({
+        "account_id": account_id,
+        "balance_g": int(balances.get(account_id, 0)),
+        "leaf": leaf_hex,
+        "proof": proof,            # 256 steps (sparse)
+        "state_root": root_hex,
+        "local_verify_ok": ok_local
+    })
+@app.get("/api/v2/state/proof/<account_id>/compressed")
+def v2_state_proof_compressed(account_id):
+    balances = _fetch_balances()
+    leaf_hex, proof, root_hex = prove_account(balances, account_id)
+    # compress: keep only steps whose sibling != default at that depth
+    # :contentReference[oaicite:9]{index=9}
+    compact = []
+    for depth, step in enumerate(proof, start=1):  # depth 1..256 (from leaf upward)
+        default_hex = "0x" + DEFAULTS[257 - depth].hex()
+        if _norm0x(step["sibling"]) != _norm0x(default_hex):
+            compact.append({"depth": depth, "sibling": step["sibling"], "is_right": step["is_right"]})
+    return j({
+        "account_id": account_id,
+        "balance_g": int(balances.get(account_id, 0)),
+        "leaf": leaf_hex,
+        "state_root": root_hex,
+        "proof_compressed": compact,
+        "meta": {"skipped_defaults": 256 - len(compact)}
+    })
+
 if __name__ == "__main__":
     app.run(debug=True)

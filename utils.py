@@ -1,4 +1,8 @@
 import hashlib
+def _norm0x(h: str) -> str:
+    h = (h or "").lower()
+    if h.startswith("0x"): h = h[2:]
+    return h.zfill(64)
 
 # --- Chain helpers (v5/v6 compatible) ---
 def _signed_raw_bytes(signed):
