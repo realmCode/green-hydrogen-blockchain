@@ -28,7 +28,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.exceptions import InvalidSignature
 
 
-from utils import *
+from utils import _signed_raw_bytes, derive_onchain_block_id
 # ---------------- Config ----------------
 load_dotenv()
 MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
@@ -123,6 +123,7 @@ def close_block(note: Optional[str] = None) -> dict:
     pending = list(db.ledger_txs.find({"block_id": None}).sort("created_at", 1))
     if not pending:
         return {"error": "no pending txs to close"}
+
     tx_hashes = [p["tx_hash"] for p in pending]
     root = merkle_root(tx_hashes)
 
@@ -130,7 +131,8 @@ def close_block(note: Optional[str] = None) -> dict:
     prev_hash = prev["merkle_root"] if prev else None
     chain_hash = sha256_hex(((prev_hash or "") + root).encode("utf-8"))
 
-    blk = {
+    # create block doc first to get its ObjectId
+    blk_doc = {
         "prev_hash": prev_hash,
         "merkle_root": root,
         "chain_hash": chain_hash,
@@ -139,23 +141,77 @@ def close_block(note: Optional[str] = None) -> dict:
         "created_at": datetime.utcnow(),
         "anchor_tx": None,
         "contract_address": ANCHOR_ADDR,
-        # "onchain_block_id": 
+        "chain": os.getenv("CHAIN_NAME", "sepolia"),
     }
-    res = db.blocks.insert_one(blk)
+    res = db.blocks.insert_one(blk_doc)
     block_id = res.inserted_id
-    onchain_block_id = int(hashlib.sha256(str(block_id).encode()).hexdigest(), 16) % (2**256)   
-    db.blocks.update_one({"_id": block_id}, {"$set": {"onchain_block_id": str(onchain_block_id)}})
-    db.ledger_txs.update_many({"_id": {"$in": [p["_id"] for p in pending]}},
-                              {"$set": {"block_id": block_id}})
 
-    # Domain finalization on block close:
-    # - mint: credit.status pending -> issued, credit.block_id = block_id
+    # compute and store onchain_block_id (uint256) deterministically
+    onchain_block_id = derive_onchain_block_id(str(block_id))
+    db.blocks.update_one({"_id": block_id}, {"$set": {"onchain_block_id": str(onchain_block_id)}})
+
+    # attach block_id to all pending txs
+    db.ledger_txs.update_many(
+        {"_id": {"$in": [p["_id"] for p in pending]}},
+        {"$set": {"block_id": block_id}}
+    )
+
+    # domain: finalize credits in this block (issue mints)
     for p in pending:
         if p["type"] == "mint":
             cid = ObjectId(p["payload"]["credit_id"])
             db.credits.update_one({"_id": cid}, {"$set": {"status": "issued", "block_id": block_id}})
 
-    return {"block_id": str(block_id), "merkle_root": root, "tx_count": len(pending), "chain_hash": chain_hash}
+    # --- Auto-anchor if chain env is present ---
+    anchored = False
+    anchor_txh = None
+    if WEB3_RPC_URL and REG_PK and ANCHOR_ADDR:
+        try:
+            from web3 import Web3
+            w3 = Web3(Web3.HTTPProvider(WEB3_RPC_URL))
+            acct = w3.eth.account.from_key(REG_PK)
+            abi = [{
+              "inputs":[{"internalType":"uint256","name":"blockId","type":"uint256"},
+                        {"internalType":"bytes32","name":"root","type":"bytes32"}],
+              "name":"anchor","outputs":[{"internalType":"bool","name":"","type":"bool"}],
+              "stateMutability":"nonpayable","type":"function"
+            }]
+            contract = w3.eth.contract(address=Web3.to_checksum_address(ANCHOR_ADDR), abi=abi)
+            root_bytes = w3.to_bytes(hexstr=root)
+            tx = contract.functions.anchor(onchain_block_id, root_bytes).build_transaction({
+                "from": acct.address,
+                "nonce": w3.eth.get_transaction_count(acct.address),
+                "gas": 200000,
+                "maxFeePerGas": w3.to_wei("20", "gwei"),
+                "maxPriorityFeePerGas": w3.to_wei("1", "gwei"),
+                "chainId": w3.eth.chain_id,
+            })
+            signed = w3.eth.account.sign_transaction(tx, REG_PK)
+            txh = w3.eth.send_raw_transaction(_signed_raw_bytes(signed))
+            anchor_txh = txh.hex() if hasattr(txh, "hex") else txh
+
+            db.blocks.update_one({"_id": block_id}, {"$set": {"anchor_tx": anchor_txh}})
+            # mark minted credits in this block as anchored
+            minted_in_block = db.ledger_txs.find({"block_id": block_id, "type": "mint"})
+            for t in minted_in_block:
+                db.credits.update_one({"_id": ObjectId(t["payload"]["credit_id"])},
+                                      {"$set": {"anchor_tx": anchor_txh}})
+            ledger_append("anchor", {"block_id": str(block_id), "root": root, "anchor_tx": anchor_txh})
+            anchored = True
+        except Exception as e:
+            # don’t fail block close if anchoring fails; just return the error
+            anchor_txh = f"ERROR: {e}"
+
+    return {
+        "block_id": str(block_id),
+        "onchain_block_id": str(onchain_block_id),
+        "merkle_root": root,
+        "tx_count": len(pending),
+        "chain_hash": chain_hash,
+        "contract_address": ANCHOR_ADDR,
+        "anchored": anchored,
+        "anchor_tx": anchor_txh
+    }
 
 # --------------- Routes (prefix: /api/v1) ---------------
 
@@ -522,7 +578,10 @@ def blocks_latest():
         "chain_hash": blk["chain_hash"],
         "tx_count": blk["tx_count"],
         "created_at": blk["created_at"].isoformat(),
-        "anchor_tx": blk.get("anchor_tx")
+        "anchor_tx": blk.get("anchor_tx"),
+        "onchain_block_id": blk.get("onchain_block_id"),
+        "contract_address": blk.get("contract_address"),
+        "chain": blk.get("chain", "sepolia"),
     })
 
 # ---- Optional Anchor to chain ----
@@ -533,10 +592,14 @@ def anchor_block(block_id):
     from web3 import Web3
     w3 = Web3(Web3.HTTPProvider(WEB3_RPC_URL))
 
-    try: blk = db.blocks.find_one({"_id": ObjectId(block_id)})
-    except Exception: return j({"error": "invalid block_id"}, 400)
-    if not blk: return j({"error": "block not found"}, 404)
-    if blk.get("anchor_tx"): return j({"error": "already anchored", "anchor_tx": blk["anchor_tx"]}, 400)
+    try:
+        blk = db.blocks.find_one({"_id": ObjectId(block_id)})
+    except Exception:
+        return j({"error": "invalid block_id"}, 400)
+    if not blk:
+        return j({"error": "block not found"}, 404)
+    if blk.get("anchor_tx"):
+        return j({"error": "already anchored", "anchor_tx": blk["anchor_tx"]}, 400)
 
     acct = w3.eth.account.from_key(REG_PK)
     abi = [{
@@ -546,9 +609,10 @@ def anchor_block(block_id):
       "stateMutability":"nonpayable","type":"function"
     }]
     contract = w3.eth.contract(address=Web3.to_checksum_address(ANCHOR_ADDR), abi=abi)
-    synthetic_id = int(sha256_hex(str(blk["_id"]).encode())[:10], 16) % 1_000_000
+
+    onchain_block_id = int(blk.get("onchain_block_id") or derive_onchain_block_id(block_id))
     root_bytes = w3.to_bytes(hexstr=blk["merkle_root"])
-    txn = contract.functions.anchor(synthetic_id, root_bytes).build_transaction({
+    txn = contract.functions.anchor(onchain_block_id, root_bytes).build_transaction({
         "from": acct.address,
         "nonce": w3.eth.get_transaction_count(acct.address),
         "gas": 200000,
@@ -557,18 +621,15 @@ def anchor_block(block_id):
         "chainId": w3.eth.chain_id
     })
     signed = w3.eth.account.sign_transaction(txn, REG_PK)
-    txh = w3.eth.send_raw_transaction(signed.rawTransaction).hex()
+    txh = w3.eth.send_raw_transaction(_signed_raw_bytes(signed)).hex()
 
     db.blocks.update_one({"_id": blk["_id"]}, {"$set": {"anchor_tx": txh}})
-    # mark all credits in this block as "anchored" where applicable (only mints logically matter)
     minted_in_block = db.ledger_txs.find({"block_id": blk["_id"], "type": "mint"})
     for t in minted_in_block:
         db.credits.update_one({"_id": ObjectId(t["payload"]["credit_id"])}, {"$set": {"anchor_tx": txh}})
     ledger_append("anchor", {"block_id": block_id, "root": blk["merkle_root"], "anchor_tx": txh})
 
     return j({"anchored": True, "tx": txh})
-
-
 
 
 ########################################################### anchor blocks
@@ -623,10 +684,11 @@ def get_block(block_id):
 
 @app.get("/api/v1/blocks/<block_id>/txs")
 def get_block_txs(block_id):
-    block = db.blocks.find_one({"_id": ObjectId(block_id)})
-    if not block:
+    blk = db.blocks.find_one({"_id": ObjectId(block_id)})
+    if not blk:
         return j({"error": "block not found"}), 404
-    txs = list(db.txs.find({"block_id": block_id}).sort("created_at", 1))
+
+    txs = list(db.ledger_txs.find({"block_id": ObjectId(block_id)}).sort("created_at", 1))
     out = [{"tx_hash": t["tx_hash"], "type": t.get("type","")} for t in txs]
     return j({
         "block_id": block_id,
@@ -635,6 +697,7 @@ def get_block_txs(block_id):
         "merkle_concat": "left||right, duplicate last if odd",
         "txs": out
     })
+
 
 @app.get("/api/v1/proof/tx/<tx_hash>")
 def get_tx_proof(tx_hash):
