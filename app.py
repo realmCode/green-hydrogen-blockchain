@@ -1,117 +1,79 @@
+# app.py  — Phase-1: Flask + Mongo + Ledger + Merkle + Optional Anchor
+# Run:
+#   pip install flask pymongo cryptography python-dotenv werkzeug web3
+#   export MONGODB_URI="mongodb://localhost:27017"
+#   export DB_NAME="h2_registry"
+#   python app.py
+#
+# Optional (for anchoring):
+#   export WEB3_RPC_URL="https://sepolia.infura.io/v3/<KEY>"
+#   export REGISTRY_PRIVATE_KEY="0x..."
+#   export ANCHOR_CONTRACT_ADDRESS="0x..."   # CreditAnchor(anchor(blockId, root))
+#
+# API base: http://127.0.0.1:5000/api/v1
+
 import os, json, hashlib
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, List
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, Response
 from werkzeug.utils import secure_filename
 from pymongo import MongoClient, ASCENDING
 from bson import ObjectId
 from dotenv import load_dotenv
 
-# ---- Crypto (Ed25519) ----
+# Ed25519
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives import serialization
 from cryptography.exceptions import InvalidSignature
 
-# ------------------- Config -------------------
+# ---------------- Config ----------------
 load_dotenv()
 MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
-DB_NAME = os.getenv("DB_NAME", "h2_registry")
+DB_NAME      = os.getenv("DB_NAME", "h2_registry")
 EVIDENCE_DIR = os.getenv("EVIDENCE_DIR", "evidence_store")
 os.makedirs(EVIDENCE_DIR, exist_ok=True)
+
+# Optional chain env
+WEB3_RPC_URL = os.getenv("WEB3_RPC_URL")
+REG_PK       = os.getenv("REGISTRY_PRIVATE_KEY")
+ANCHOR_ADDR  = os.getenv("ANCHOR_CONTRACT_ADDRESS")
 
 client = MongoClient(MONGODB_URI)
 db = client[DB_NAME]
 
-# indexes (idempotent)
+# Indexes (idempotent)
 db.evidence.create_index("sha256_hex", unique=True)
+db.accounts.create_index("name")
 db.sensors.create_index([("electrolyzer_id", ASCENDING), ("owner_account_id", ASCENDING)], unique=True)
 db.production_events.create_index([("electrolyzer_id", ASCENDING), ("start_time", ASCENDING), ("end_time", ASCENDING)])
-# ---- NEW COLLECTION INDEXES ----
-db.credits.create_index([("owner_account_id", 1), ("status", 1)])
-db.ledger_txs.create_index([("block_id", 1)])   # null until closed into a block
-db.blocks.create_index([("created_at", 1)])
-
-# ---- UNITS ----
-# 1 credit = 1 gram (int)
-def kg_to_g(kg: float) -> int:
-    return int(round(kg * 1000))
-
-# ---- MINI LEDGER & MERKLE ----
-def tx_hash(payload: dict) -> str:
-    return sha256_hex(canonical_json(payload).encode("utf-8"))
-
-def merkle_root(hashes: list[str]) -> str:
-    if not hashes: 
-        return "0"*64
-    layer = hashes[:]
-    while len(layer) > 1:
-        nxt = []
-        for i in range(0, len(layer), 2):
-            a = layer[i]
-            b = layer[i+1] if i+1 < len(layer) else a  # duplicate odd
-            nxt.append(sha256_hex((a + b).encode("utf-8")))
-        layer = nxt
-    return layer[0]
-
-def ledger_append(tx_type: str, payload: dict) -> str:
-    """Store a pending ledger tx (block_id=None). Returns tx_hash."""
-    th = tx_hash({"type": tx_type, **payload})
-    db.ledger_txs.insert_one({
-        "type": tx_type,
-        "payload": payload,
-        "tx_hash": th,
-        "block_id": None,
-        "created_at": datetime.utcnow()
-    })
-    return th
-
-def close_block(note: str | None = None) -> dict:
-    """Take all pending txs (block_id=None), roll Merkle, create a block."""
-    pending = list(db.ledger_txs.find({"block_id": None}).sort("created_at", 1))
-    if not pending:
-        return {"error": "no pending txs"}
-    tx_hashes = [p["tx_hash"] for p in pending]
-    root = merkle_root(tx_hashes)
-    # prev
-    prev = db.blocks.find_one(sort=[("_id", -1)])
-    prev_hash = prev["merkle_root"] if prev else None
-    blk = {
-        "prev_hash": prev_hash,
-        "merkle_root": root,
-        "tx_count": len(pending),
-        "note": note,
-        "created_at": datetime.utcnow(),
-        "anchor_tx": None
-    }
-    res = db.blocks.insert_one(blk)
-    block_id = res.inserted_id
-    db.ledger_txs.update_many({"_id": {"$in": [p["_id"] for p in pending]}},
-                              {"$set": {"block_id": block_id}})
-    return {"block_id": str(block_id), "merkle_root": root, "tx_count": len(pending)}
+db.credits.create_index([("owner_account_id", ASCENDING), ("status", ASCENDING)])
+db.ledger_txs.create_index([("block_id", ASCENDING), ("created_at", ASCENDING)])
+db.blocks.create_index([("created_at", ASCENDING)])
 
 app = Flask(__name__)
-from flask.json.provider import DefaultJSONProvider
-from bson import ObjectId
-from datetime import datetime
 
-class MongoJSONProvider(DefaultJSONProvider):
-    def default(self, o):
-        if isinstance(o, ObjectId):
-            return str(o)
-        if isinstance(o, datetime):
-            return o.isoformat()
-        return super().default(o)
+# --------------- JSON helper ---------------
+def j(data, status=200):
+    return Response(json.dumps(data, default=str), status=status, mimetype="application/json")
 
-app.json = MongoJSONProvider(app)
-
-# ------------------- Helpers -------------------
-def canonical_json(data: dict) -> str:
-    """Deterministic JSON for signing (sorted keys, compact)."""
-    return json.dumps(data, separators=(",", ":"), sort_keys=True)
-
+# --------------- Helpers ---------------
 def sha256_hex(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
+
+def canonical_json(data: dict) -> str:
+    return json.dumps(data, separators=(",", ":"), sort_keys=True)
+
+def as_naive_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+def parse_iso(s: str) -> datetime:
+    # supports "...Z"
+    if s.endswith("Z"):
+        s = s[:-1]
+    return datetime.fromisoformat(s)
 
 def load_pubkey(pem_text: str) -> Ed25519PublicKey:
     return serialization.load_pem_public_key(pem_text.encode("utf-8"))
@@ -124,150 +86,158 @@ def verify_ed25519(pub_pem: str, msg: bytes, sig_hex: str) -> bool:
     except (InvalidSignature, ValueError):
         return False
 
-def as_naive_utc(dt: datetime) -> datetime:
-    """Convert any tz-aware dt to naive UTC; keep naive as-is."""
-    if dt.tzinfo is not None:
-        return dt.astimezone(timezone.utc).replace(tzinfo=None)
-    return dt
+# Units: 1 credit = 1 gram
+def kg_to_g(kg: float) -> int:
+    return int(round(kg * 1000))
 
-def parse_datetime(s: str) -> datetime:
-    # Accept "YYYY-MM-DDTHH:MM:SS" (naive) or ISO with 'Z'/'+/-'
-    try:
-        # handle trailing Z
-        if s.endswith("Z"):
-            s = s[:-1]
-            return datetime.fromisoformat(s).replace(tzinfo=None)
-        return datetime.fromisoformat(s)
-    except Exception:
-        raise ValueError("invalid datetime format; use ISO 8601")
+# ---------- Merkle (tree hash over tx_hash strings) ----------
+def merkle_root(hashes: List[str]) -> str:
+    if not hashes: return "0"*64
+    layer = hashes[:]
+    while len(layer) > 1:
+        nxt = []
+        for i in range(0, len(layer), 2):
+            a = layer[i]
+            b = layer[i+1] if i+1 < len(layer) else a
+            nxt.append(sha256_hex((a + b).encode("utf-8")))
+        layer = nxt
+    return layer[0]
 
-def oid(s: Optional[str]) -> Optional[ObjectId]:
-    if s is None:
-        return None
-    return ObjectId(s)
+def tx_hash(payload: dict) -> str:
+    return sha256_hex(canonical_json(payload).encode("utf-8"))
 
-def o2s(x):
-    return str(x) if isinstance(x, ObjectId) else x
+def ledger_append(tx_type: str, payload: dict) -> str:
+    th = tx_hash({"type": tx_type, **payload})
+    db.ledger_txs.insert_one({
+        "type": tx_type,
+        "payload": payload,
+        "tx_hash": th,
+        "block_id": None,
+        "created_at": datetime.utcnow()
+    })
+    return th
 
-# ------------------- Routes -------------------
+def close_block(note: Optional[str] = None) -> dict:
+    pending = list(db.ledger_txs.find({"block_id": None}).sort("created_at", 1))
+    if not pending:
+        return {"error": "no pending txs to close"}
+    tx_hashes = [p["tx_hash"] for p in pending]
+    root = merkle_root(tx_hashes)
 
-@app.get("/health")
+    prev = db.blocks.find_one(sort=[("_id", -1)])
+    prev_hash = prev["merkle_root"] if prev else None
+    chain_hash = sha256_hex(((prev_hash or "") + root).encode("utf-8"))
+
+    blk = {
+        "prev_hash": prev_hash,
+        "merkle_root": root,
+        "chain_hash": chain_hash,
+        "tx_count": len(pending),
+        "note": note,
+        "created_at": datetime.utcnow(),
+        "anchor_tx": None
+    }
+    res = db.blocks.insert_one(blk)
+    block_id = res.inserted_id
+    db.ledger_txs.update_many({"_id": {"$in": [p["_id"] for p in pending]}},
+                              {"$set": {"block_id": block_id}})
+
+    # Domain finalization on block close:
+    # - mint: credit.status pending -> issued, credit.block_id = block_id
+    for p in pending:
+        if p["type"] == "mint":
+            cid = ObjectId(p["payload"]["credit_id"])
+            db.credits.update_one({"_id": cid}, {"$set": {"status": "issued", "block_id": block_id}})
+
+    return {"block_id": str(block_id), "merkle_root": root, "tx_count": len(pending), "chain_hash": chain_hash}
+
+# --------------- Routes (prefix: /api/v1) ---------------
+
+@app.get("/api/v1/health")
 def health():
-    return jsonify({"ok": True})
+    return j({"ok": True})
 
 # ---- Accounts ----
-@app.post("/accounts")
+@app.post("/api/v1/accounts")
 def create_account():
-    body = request.get_json(force=True, silent=False)
+    body = request.get_json(force=True)
     name = body.get("name")
     role = body.get("role")
     public_key_pem = body.get("public_key_pem")
     if not all([name, role, public_key_pem]):
-        return jsonify({"error": "name, role, public_key_pem required"}), 400
-
+        return j({"error": "name, role, public_key_pem required"}, 400)
     doc = {"name": name, "role": role, "public_key_pem": public_key_pem}
     res = db.accounts.insert_one(doc)
-    return jsonify({"id": str(res.inserted_id), **doc})
+    ledger_append("account_create", {"account_id": str(res.inserted_id), "role": role})
+    return j({"id": str(res.inserted_id), **doc})
 
-@app.get("/accounts")
+@app.get("/api/v1/accounts")
 def list_accounts():
     out = []
     for a in db.accounts.find({}):
         out.append({"id": str(a["_id"]), "name": a["name"], "role": a["role"], "public_key_pem": a["public_key_pem"]})
-    return jsonify(out)
+    return j(out)
 
 # ---- Sensors ----
-@app.post("/sensors")
+@app.post("/api/v1/sensors")
 def register_sensor():
-    body = request.get_json(force=True, silent=False)
+    body = request.get_json(force=True)
     name = body.get("name")
     electrolyzer_id = body.get("electrolyzer_id")
     owner_account_id = body.get("owner_account_id")
     public_key_pem = body.get("public_key_pem")
-
     if not all([name, electrolyzer_id, owner_account_id, public_key_pem]):
-        return jsonify({"error": "name, electrolyzer_id, owner_account_id, public_key_pem required"}), 400
-
+        return j({"error": "name, electrolyzer_id, owner_account_id, public_key_pem required"}, 400)
     try:
         owner = db.accounts.find_one({"_id": ObjectId(owner_account_id)})
     except Exception:
-        return jsonify({"error": "invalid owner_account_id"}), 400
+        return j({"error": "invalid owner_account_id"}, 400)
     if not owner:
-        return jsonify({"error": "owner account not found"}), 404
+        return j({"error": "owner account not found"}, 404)
 
-    doc = {
-        "name": name,
-        "electrolyzer_id": electrolyzer_id,
-        "owner_account_id": owner["_id"],
-        "public_key_pem": public_key_pem
-    }
+    doc = {"name": name, "electrolyzer_id": electrolyzer_id,
+           "owner_account_id": owner["_id"], "public_key_pem": public_key_pem}
     try:
         res = db.sensors.insert_one(doc)
     except Exception as e:
-        return jsonify({"error": f"sensor registration failed: {e}"}), 400
+        return j({"error": f"sensor registration failed: {e}"}, 400)
+    ledger_append("sensor_register", {"sensor_id": str(res.inserted_id), "electrolyzer_id": electrolyzer_id})
+    return j({"id": str(res.inserted_id), "name": name, "electrolyzer_id": electrolyzer_id,
+              "owner_account_id": str(owner["_id"]), "public_key_pem": public_key_pem})
 
-    return jsonify({
-        "id": str(res.inserted_id),
-        "name": name,
-        "electrolyzer_id": electrolyzer_id,
-        "owner_account_id": str(owner["_id"]),
-        "public_key_pem": public_key_pem
-    })
-
-@app.get("/sensors")
+@app.get("/api/v1/sensors")
 def list_sensors():
     out = []
     for s in db.sensors.find({}):
-        out.append({
-            "id": str(s["_id"]),
-            "name": s["name"],
-            "electrolyzer_id": s["electrolyzer_id"],
-            "owner_account_id": str(s["owner_account_id"]),
-            "public_key_pem": s["public_key_pem"]
-        })
-    return jsonify(out)
+        out.append({"id": str(s["_id"]), "name": s["name"], "electrolyzer_id": s["electrolyzer_id"],
+                    "owner_account_id": str(s["owner_account_id"]), "public_key_pem": s["public_key_pem"]})
+    return j(out)
 
-# ---- Evidence (file upload & SHA-256 pin) ----
-@app.post("/evidence/upload")
+# ---- Evidence ----
+@app.post("/api/v1/evidence/upload")
 def upload_evidence():
     if "file" not in request.files:
-        return jsonify({"error": "file is required"}), 400
+        return j({"error": "file is required"}, 400)
     f = request.files["file"]
     filename = secure_filename(f.filename or "evidence.bin")
     content = f.read()
     digest = sha256_hex(content)
 
-    existing = db.evidence.find_one({"sha256_hex": digest})
-    if existing:
-        return jsonify({
-            "id": str(existing["_id"]),
-            "filename": existing["filename"],
-            "sha256_hex": existing["sha256_hex"],
-            "stored_path": existing["stored_path"],
-            "created_at": existing["created_at"].isoformat()
-        })
+    ex = db.evidence.find_one({"sha256_hex": digest})
+    if ex:
+        return j({"id": str(ex["_id"]), "filename": ex["filename"], "sha256_hex": ex["sha256_hex"],
+                  "stored_path": ex["stored_path"], "created_at": ex["created_at"].isoformat()})
 
     stored_name = f"{digest[:12]}_{filename}"
     stored_path = os.path.join(EVIDENCE_DIR, stored_name)
     with open(stored_path, "wb") as out:
         out.write(content)
-
-    doc = {
-        "filename": filename,
-        "sha256_hex": digest,
-        "stored_path": stored_path,
-        "created_at": datetime.utcnow()
-    }
+    doc = {"filename": filename, "sha256_hex": digest, "stored_path": stored_path, "created_at": datetime.utcnow()}
     res = db.evidence.insert_one(doc)
-    return jsonify({
-        "id": str(res.inserted_id),
-        "filename": filename,
-        "sha256_hex": digest,
-        "stored_path": stored_path,
-        "created_at": doc["created_at"].isoformat()
-    })
+    ledger_append("evidence", {"evidence_id": str(res.inserted_id), "sha256_hex": digest})
+    return j({"id": str(res.inserted_id), **doc, "created_at": doc["created_at"].isoformat()})
 
-# ---- Overlap check helper ----
+# ---- Overlap check ----
 def overlap_exists(electrolyzer_id: str, start: datetime, end: datetime) -> bool:
     q = {
         "electrolyzer_id": electrolyzer_id,
@@ -281,364 +251,297 @@ def overlap_exists(electrolyzer_id: str, start: datetime, end: datetime) -> bool
     return hit is not None
 
 # ---- Events (signed by sensor) ----
-@app.post("/events")
+@app.post("/api/v1/events")
 def submit_event():
-    body = request.get_json(force=True, silent=False)
-
+    body = request.get_json(force=True)
     sensor_id = body.get("sensor_id")
     start_time = body.get("start_time")
-    end_time = body.get("end_time")
+    end_time   = body.get("end_time")
     energy_kwh = body.get("energy_kwh")
-    hydrogen_kg = body.get("hydrogen_kg")
-    evidence_id = body.get("evidence_id")
-    sensor_signature_hex = body.get("sensor_signature_hex")
+    hydrogen_kg= body.get("hydrogen_kg")
+    evidence_id= body.get("evidence_id")
+    sig_hex    = body.get("sensor_signature_hex")
 
-    # Basic checks
-    if not all([sensor_id, start_time, end_time, energy_kwh, hydrogen_kg, sensor_signature_hex]):
-        return jsonify({"error": "sensor_id, start_time, end_time, energy_kwh, hydrogen_kg, sensor_signature_hex required"}), 400
+    if not all([sensor_id, start_time, end_time, energy_kwh, hydrogen_kg, sig_hex]):
+        return j({"error": "sensor_id, start_time, end_time, energy_kwh, hydrogen_kg, sensor_signature_hex required"}, 400)
 
-    # Load sensor
-    try:
-        sdoc = db.sensors.find_one({"_id": ObjectId(sensor_id)})
-    except Exception:
-        return jsonify({"error": "invalid sensor_id"}), 400
-    if not sdoc:
-        return jsonify({"error": "sensor not found"}), 404
+    try: sdoc = db.sensors.find_one({"_id": ObjectId(sensor_id)})
+    except Exception: return j({"error": "invalid sensor_id"}, 400)
+    if not sdoc: return j({"error": "sensor not found"}, 404)
 
-    # Evidence (optional)
-    evidence_oid = None
+    ev_oid = None
     if evidence_id is not None:
         try:
-            evidence_oid = ObjectId(evidence_id)
+            ev_oid = ObjectId(evidence_id)
         except Exception:
-            return jsonify({"error": "invalid evidence_id"}), 400
-        ev = db.evidence.find_one({"_id": evidence_oid})
-        if not ev:
-            return jsonify({"error": "evidence not found"}), 404
+            return j({"error": "invalid evidence_id"}, 400)
+        if not db.evidence.find_one({"_id": ev_oid}):
+            return j({"error": "evidence not found"}, 404)
 
-    # Parse times
     try:
-        st = as_naive_utc(parse_datetime(start_time))
-        en = as_naive_utc(parse_datetime(end_time))
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    if en <= st:
-        return jsonify({"error": "end_time must be after start_time"}), 400
+        st = as_naive_utc(parse_iso(start_time))
+        en = as_naive_utc(parse_iso(end_time))
+    except Exception:
+        return j({"error": "invalid datetime format; use ISO 8601"}, 400)
+    if en <= st: return j({"error": "end_time must be after start_time"}, 400)
 
-    # Canonical payload EXACTLY as signed by the sensor
     payload = {
         "sensor_id": str(sdoc["_id"]),
         "start_time": st.isoformat(),
         "end_time": en.isoformat(),
         "energy_kwh": round(float(energy_kwh), 6),
         "hydrogen_kg": round(float(hydrogen_kg), 6),
-        "evidence_id": str(evidence_oid) if evidence_oid else None
+        "evidence_id": str(ev_oid) if ev_oid else None
     }
     canonical = canonical_json(payload)
-    sig_ok = verify_ed25519(sdoc["public_key_pem"], canonical.encode("utf-8"), sensor_signature_hex)
-
-    # Overlap per electrolyzer
-    ov_ok = not overlap_exists(sdoc["electrolyzer_id"], st, en)
+    sig_ok = verify_ed25519(sdoc["public_key_pem"], canonical.encode("utf-8"), sig_hex)
+    ov_ok  = not overlap_exists(sdoc["electrolyzer_id"], st, en)
     verified = bool(sig_ok and ov_ok)
 
     doc = {
         "sensor_id": sdoc["_id"],
         "electrolyzer_id": sdoc["electrolyzer_id"],
-        "start_time": st,
-        "end_time": en,
-        "energy_kwh": float(energy_kwh),
-        "hydrogen_kg": float(hydrogen_kg),
-        "evidence_id": evidence_oid,
+        "start_time": st, "end_time": en,
+        "energy_kwh": float(energy_kwh), "hydrogen_kg": float(hydrogen_kg),
+        "evidence_id": ev_oid,
         "payload_canonical": canonical,
-        "sensor_signature_hex": sensor_signature_hex,
+        "sensor_signature_hex": sig_hex,
         "signature_valid": sig_ok,
         "overlap_ok": ov_ok,
         "verified": verified,
         "created_at": datetime.utcnow()
     }
     res = db.production_events.insert_one(doc)
+    ledger_append("event", {"event_id": str(res.inserted_id), "electrolyzer_id": sdoc["electrolyzer_id"],
+                            "start_time": payload["start_time"], "end_time": payload["end_time"],
+                            "hydrogen_kg": payload["hydrogen_kg"]})
 
-    return jsonify({
+    return j({
         "id": str(res.inserted_id),
         "sensor_id": str(sdoc["_id"]),
         "electrolyzer_id": sdoc["electrolyzer_id"],
-        "start_time": st.isoformat(),
-        "end_time": en.isoformat(),
-        "energy_kwh": doc["energy_kwh"],
-        "hydrogen_kg": doc["hydrogen_kg"],
-        "evidence_id": str(evidence_oid) if evidence_oid else None,
+        "start_time": st.isoformat(), "end_time": en.isoformat(),
+        "energy_kwh": doc["energy_kwh"], "hydrogen_kg": doc["hydrogen_kg"],
+        "evidence_id": str(ev_oid) if ev_oid else None,
         "payload_canonical": canonical,
-        "sensor_signature_hex": sensor_signature_hex,
-        "signature_valid": sig_ok,
-        "overlap_ok": ov_ok,
-        "verified": verified
+        "sensor_signature_hex": sig_hex,
+        "signature_valid": sig_ok, "overlap_ok": ov_ok, "verified": verified
     })
 
-@app.get("/events")
+@app.get("/api/v1/events")
 def list_events():
     out = []
     for e in db.production_events.find({}).sort("created_at", -1):
         out.append({
-            "id": str(e["_id"]),
-            "sensor_id": str(e["sensor_id"]),
+            "id": str(e["_id"]), "sensor_id": str(e["sensor_id"]),
             "electrolyzer_id": e["electrolyzer_id"],
-            "start_time": e["start_time"].isoformat(),
-            "end_time": e["end_time"].isoformat(),
-            "energy_kwh": e["energy_kwh"],
-            "hydrogen_kg": e["hydrogen_kg"],
+            "start_time": e["start_time"].isoformat(), "end_time": e["end_time"].isoformat(),
+            "energy_kwh": e["energy_kwh"], "hydrogen_kg": e["hydrogen_kg"],
             "evidence_id": str(e["evidence_id"]) if e.get("evidence_id") else None,
-            "payload_canonical": e["payload_canonical"],
-            "sensor_signature_hex": e["sensor_signature_hex"],
             "signature_valid": bool(e["signature_valid"]),
-            "overlap_ok": bool(e["overlap_ok"]),
-            "verified": bool(e["verified"])
+            "overlap_ok": bool(e["overlap_ok"]), "verified": bool(e["verified"])
         })
-    return jsonify(out)
-# ---------- CREDITS (1 credit = 1 gram) ----------
+    return j(out)
 
-@app.post("/mint")
+# ---- Credits (1g) ----
+@app.post("/api/v1/credits/mint")
 def mint_credits():
-    """
-    Body: { "event_id": "<id>" }
-    Rules:
-      - event must exist and be verified
-      - credits go to the producer (sensor owner)
-      - amount_g = hydrogen_kg * 1000
-    """
-    body = request.get_json(force=True, silent=False)
+    body = request.get_json(force=True)
     event_id = body.get("event_id")
-    if not event_id:
-        return jsonify({"error": "event_id required"}, 400)
-
+    if not event_id: return j({"error": "event_id required"}, 400)
     try:
         evt = db.production_events.find_one({"_id": ObjectId(event_id)})
     except Exception:
-        return jsonify({"error": "invalid event_id"}, 400)
+        return j({"error": "invalid event_id"}, 400)
+    if not evt: return j({"error": "event not found"}, 404)
+    if not evt.get("verified"): return j({"error": "event not verified"}, 400)
 
-    if not evt:
-        return jsonify({"error": "event not found"}, 404)
-    if not evt.get("verified"):
-        return jsonify({"error": "event not verified"}, 400)
-
-    # producer is the owner of the sensor
     sensor = db.sensors.find_one({"_id": evt["sensor_id"]})
-    if not sensor:
-        return jsonify({"error": "sensor not found for event"}, 500)
+    if not sensor: return j({"error": "sensor not found"}, 500)
     producer_id = sensor["owner_account_id"]
 
     amount_g = kg_to_g(float(evt["hydrogen_kg"]))
-    payload = {
-        "event_id": str(evt["_id"]),
-        "producer_account_id": str(producer_id),
-        "owner_account_id": str(producer_id),
-        "amount_g": amount_g
-    }
-    th = ledger_append("mint", payload)
-
     cred = {
         "amount_g": amount_g,
-        "status": "issued",  # issued | transferred | retired
+        "status": "pending",  # pending -> issued (on block close) -> retired / anchored flag set separately
         "producer_account_id": producer_id,
         "owner_account_id": producer_id,
         "event_id": evt["_id"],
-        "tx_hash": th,
+        "block_id": None,
+        "anchor_tx": None,
         "created_at": datetime.utcnow()
     }
     res = db.credits.insert_one(cred)
+    credit_id = str(res.inserted_id)
 
-    return jsonify({
-        "credit_id": str(res.inserted_id),
-        "amount_g": amount_g,
-        "owner_account_id": str(producer_id),
-        "tx_hash": th
-    })
+    th = ledger_append("mint", {"credit_id": credit_id, "event_id": event_id, "amount_g": amount_g,
+                                "owner_account_id": str(producer_id)})
 
-@app.get("/accounts/<account_id>/balance")
+    return j({"credit_id": credit_id, "amount_g": amount_g, "owner_account_id": str(producer_id),
+              "status": "pending", "tx_hash": th})
+
+@app.get("/api/v1/accounts/<account_id>/balance")
 def get_balance(account_id):
-    """
-    Sum of non-retired credits for an account (grams + kg).
-    """
-    try:
-        acc = db.accounts.find_one({"_id": ObjectId(account_id)})
-    except Exception:
-        return jsonify({"error": "invalid account_id"}, 400)
-    if not acc:
-        return jsonify({"error": "account not found"}, 404)
-
+    try: acc = db.accounts.find_one({"_id": ObjectId(account_id)})
+    except Exception: return j({"error": "invalid account_id"}, 400)
+    if not acc: return j({"error": "account not found"}, 404)
     agg = list(db.credits.aggregate([
         {"$match": {"owner_account_id": acc["_id"], "status": {"$ne": "retired"}}},
         {"$group": {"_id": None, "g": {"$sum": "$amount_g"}}}
     ]))
     g = int(agg[0]["g"]) if agg else 0
-    kg = g / 1000.0
-    return jsonify({"account_id": account_id, "balance_g": g, "balance_kg": kg})
+    return j({"account_id": account_id, "balance_g": g, "balance_kg": g/1000.0})
 
-@app.post("/transfer")
+@app.post("/api/v1/credits/transfer")
 def transfer_credit():
     """
-    Body: { "credit_id": "...", "from_account_id": "...", "to_account_id": "...", "owner_signature_hex": "..." }
-    Owner signs canonical({"credit_id","from_account_id","to_account_id"})
+    Supports partial transfer via 'amount_g'.
+    Body: { credit_id, from_account_id, to_account_id, amount_g, owner_signature_hex }
+    Signature by FROM account over canonical({credit_id,from_account_id,to_account_id,amount_g})
     """
-    body = request.get_json(force=True, silent=False)
+    body = request.get_json(force=True)
     credit_id = body.get("credit_id")
-    from_id = body.get("from_account_id")
-    to_id = body.get("to_account_id")
-    sig_hex = body.get("owner_signature_hex")
-    if not all([credit_id, from_id, to_id, sig_hex]):
-        return jsonify({"error": "credit_id, from_account_id, to_account_id, owner_signature_hex required"}, 400)
+    from_id   = body.get("from_account_id")
+    to_id     = body.get("to_account_id")
+    amount_g  = int(body.get("amount_g", 0))
+    sig_hex   = body.get("owner_signature_hex")
+    if not all([credit_id, from_id, to_id, amount_g, sig_hex]):
+        return j({"error": "credit_id, from_account_id, to_account_id, amount_g, owner_signature_hex required"}, 400)
 
     try:
         cred = db.credits.find_one({"_id": ObjectId(credit_id)})
-    except Exception:
-        return jsonify({"error": "invalid credit_id"}, 400)
-    if not cred:
-        return jsonify({"error": "credit not found"}, 404)
-    if cred["status"] == "retired":
-        return jsonify({"error": "credit retired"}, 400)
-
-    try:
         from_acc = db.accounts.find_one({"_id": ObjectId(from_id)})
-        to_acc = db.accounts.find_one({"_id": ObjectId(to_id)})
+        to_acc   = db.accounts.find_one({"_id": ObjectId(to_id)})
     except Exception:
-        return jsonify({"error": "invalid account id(s)"}, 400)
-    if not from_acc or not to_acc:
-        return jsonify({"error": "account(s) not found"}, 404)
-    if str(cred["owner_account_id"]) != str(from_acc["_id"]):
-        return jsonify({"error": "from_account is not current owner"}, 400)
+        return j({"error": "invalid id(s)"}, 400)
+    if not cred: return j({"error": "credit not found"}, 404)
+    if not from_acc or not to_acc: return j({"error": "account(s) not found"}, 404)
+    if cred["status"] == "retired": return j({"error": "credit retired"}, 400)
+    if str(cred["owner_account_id"]) != str(from_acc["_id"]): return j({"error": "not owner"}, 400)
+    if amount_g <= 0 or amount_g > int(cred["amount_g"]): return j({"error": "invalid amount_g"}, 400)
 
-    payload = {
-        "credit_id": credit_id,
-        "from_account_id": from_id,
-        "to_account_id": to_id
-    }
+    payload = {"credit_id": credit_id, "from_account_id": from_id, "to_account_id": to_id, "amount_g": amount_g}
     canonical = canonical_json(payload)
     if not verify_ed25519(from_acc["public_key_pem"], canonical.encode("utf-8"), sig_hex):
-        return jsonify({"error": "owner signature invalid"}, 400)
+        return j({"error": "owner signature invalid"}, 400)
 
-    th = ledger_append("transfer", payload)
-    db.credits.update_one({"_id": cred["_id"]},
-                          {"$set": {"owner_account_id": to_acc["_id"], "status": "transferred"}})
+    # Split or move whole
+    new_credit_id = None
+    if amount_g == int(cred["amount_g"]):
+        db.credits.update_one({"_id": cred["_id"]}, {"$set": {"owner_account_id": to_acc["_id"]}})
+        new_credit_id = credit_id
+    else:
+        # reduce source, create new for receiver
+        db.credits.update_one({"_id": cred["_id"]}, {"$inc": {"amount_g": -amount_g}})
+        new_doc = {
+            "amount_g": amount_g, "status": cred["status"],
+            "producer_account_id": cred["producer_account_id"],
+            "owner_account_id": to_acc["_id"],
+            "event_id": cred["event_id"],
+            "block_id": cred.get("block_id"), "anchor_tx": cred.get("anchor_tx"),
+            "created_at": datetime.utcnow()
+        }
+        res_new = db.credits.insert_one(new_doc)
+        new_credit_id = str(res_new.inserted_id)
 
-    db.transfers.insert_one({
-        "credit_id": cred["_id"],
-        "from_account_id": from_acc["_id"],
-        "to_account_id": to_acc["_id"],
-        "timestamp": datetime.utcnow(),
-        "owner_signature_hex": sig_hex,
-        "tx_hash": th
-    })
+    th = ledger_append("transfer", {**payload, "new_credit_id": new_credit_id})
+    return j({"ok": True, "to_credit_id": new_credit_id, "tx_hash": th})
 
-    return jsonify({"id": "ok", "to": to_id, "tx_hash": th})
-
-@app.post("/retire")
+@app.post("/api/v1/credits/retire")
 def retire_credit():
     """
-    Body: { "credit_id": "...", "owner_account_id": "...", "reason": "...", "owner_signature_hex": "..." }
-    Owner signs canonical({"credit_id","owner_account_id","reason"})
+    Supports partial retire via 'amount_g'.
+    Body: { credit_id, owner_account_id, amount_g, reason, owner_signature_hex }
+    Signature by OWNER over canonical({credit_id,owner_account_id,amount_g,reason})
     """
-    body = request.get_json(force=True, silent=False)
+    body = request.get_json(force=True)
     credit_id = body.get("credit_id")
-    owner_id = body.get("owner_account_id")
-    reason = body.get("reason") or ""
-    sig_hex = body.get("owner_signature_hex")
-    if not all([credit_id, owner_id, sig_hex]):
-        return jsonify({"error": "credit_id, owner_account_id, owner_signature_hex required"}, 400)
+    owner_id  = body.get("owner_account_id")
+    amount_g  = int(body.get("amount_g", 0))
+    reason    = body.get("reason") or ""
+    sig_hex   = body.get("owner_signature_hex")
+
+    if not all([credit_id, owner_id, amount_g, sig_hex]):
+        return j({"error": "credit_id, owner_account_id, amount_g, owner_signature_hex required"}, 400)
 
     try:
         cred = db.credits.find_one({"_id": ObjectId(credit_id)})
         owner = db.accounts.find_one({"_id": ObjectId(owner_id)})
     except Exception:
-        return jsonify({"error": "invalid id(s)"}, 400)
-    if not cred:
-        return jsonify({"error": "credit not found"}, 404)
-    if not owner:
-        return jsonify({"error": "owner account not found"}, 404)
-    if str(cred["owner_account_id"]) != str(owner["_id"]):
-        return jsonify({"error": "not owner"}, 400)
-    if cred["status"] == "retired":
-        return jsonify({"error": "already retired"}, 400)
+        return j({"error": "invalid id(s)"}, 400)
+    if not cred: return j({"error": "credit not found"}, 404)
+    if not owner: return j({"error": "owner account not found"}, 404)
+    if str(cred["owner_account_id"]) != str(owner["_id"]): return j({"error": "not owner"}, 400)
+    if cred["status"] == "retired": return j({"error": "already retired"}, 400)
+    if amount_g <= 0 or amount_g > int(cred["amount_g"]): return j({"error": "invalid amount_g"}, 400)
 
-    payload = {"credit_id": credit_id, "owner_account_id": owner_id, "reason": reason}
+    payload = {"credit_id": credit_id, "owner_account_id": owner_id, "amount_g": amount_g, "reason": reason}
     canonical = canonical_json(payload)
     if not verify_ed25519(owner["public_key_pem"], canonical.encode("utf-8"), sig_hex):
-        return jsonify({"error": "owner signature invalid"}, 400)
+        return j({"error": "owner signature invalid"}, 400)
+
+    # Partial or full retire
+    if amount_g == int(cred["amount_g"]):
+        db.credits.update_one({"_id": cred["_id"]}, {"$set": {"status": "retired"}})
+        retired_credit_id = credit_id
+    else:
+        db.credits.update_one({"_id": cred["_id"]}, {"$inc": {"amount_g": -amount_g}})
+        # store retirement record
+        db.retirements.insert_one({
+            "credit_id": cred["_id"], "owner_account_id": owner["_id"],
+            "amount_g": amount_g, "reason": reason, "timestamp": datetime.utcnow()
+        })
+        retired_credit_id = credit_id
 
     th = ledger_append("retire", payload)
-    db.credits.update_one({"_id": cred["_id"]}, {"$set": {"status": "retired"}})
-    db.retirements.insert_one({
-        "credit_id": cred["_id"],
-        "owner_account_id": owner["_id"],
-        "reason": reason,
-        "timestamp": datetime.utcnow(),
-        "owner_signature_hex": sig_hex,
-        "tx_hash": th
-    })
-    return jsonify({"id": "ok", "tx_hash": th})
-@app.post("/blocks/close")
+    return j({"ok": True, "retired_from_credit_id": retired_credit_id, "amount_g": amount_g, "tx_hash": th})
+
+# ---- Ledger / Blocks ----
+@app.post("/api/v1/blocks/close")
 def blocks_close():
-    """
-    Close a block from all pending ledger txs (block_id=None).
-    Body: { "note": "optional text" }
-    """
     body = request.get_json(silent=True) or {}
     note = body.get("note")
     res = close_block(note)
-    if "error" in res:
-        return jsonify(res, 400)
-    return jsonify(res)
+    if "error" in res: return j(res, 400)
+    return j(res)
 
-@app.get("/blocks/latest")
+@app.get("/api/v1/blocks/latest")
 def blocks_latest():
     blk = db.blocks.find_one(sort=[("_id", -1)])
-    if not blk:
-        return jsonify({"error": "no blocks yet"}, 404)
-    out = {
+    if not blk: return j({"error": "no blocks yet"}, 404)
+    return j({
         "block_id": str(blk["_id"]),
         "prev_hash": blk.get("prev_hash"),
         "merkle_root": blk["merkle_root"],
+        "chain_hash": blk["chain_hash"],
         "tx_count": blk["tx_count"],
         "created_at": blk["created_at"].isoformat(),
         "anchor_tx": blk.get("anchor_tx")
-    }
-    return jsonify(out)
+    })
 
-# OPTIONAL: minimal anchor endpoint (requires web3 installed + env set)
-# pip install web3
-
-@app.post("/blocks/<block_id>/anchor")
+# ---- Optional Anchor to chain ----
+@app.post("/api/v1/blocks/<block_id>/anchor")
 def anchor_block(block_id):
+    if not (WEB3_RPC_URL and REG_PK and ANCHOR_ADDR):
+        return j({"error": "chain env missing (WEB3_RPC_URL, REGISTRY_PRIVATE_KEY, ANCHOR_CONTRACT_ADDRESS)"}, 400)
     from web3 import Web3
-
-    WEB3_RPC_URL = os.getenv("WEB3_RPC_URL")
-    PK = os.getenv("REGISTRY_PRIVATE_KEY")
-    CONTRACT = os.getenv("ANCHOR_CONTRACT_ADDRESS")
-    if not (WEB3_RPC_URL and PK and CONTRACT):
-        return jsonify({"error": "missing chain env (WEB3_RPC_URL, REGISTRY_PRIVATE_KEY, ANCHOR_CONTRACT_ADDRESS)"}, 400)
-
-    try:
-        blk = db.blocks.find_one({"_id": ObjectId(block_id)})
-    except Exception:
-        return jsonify({"error": "invalid block_id"}, 400)
-    if not blk:
-        return jsonify({"error": "block not found"}, 404)
-    if blk.get("anchor_tx"):
-        return jsonify({"error": "already anchored", "anchor_tx": blk["anchor_tx"]}, 400)
-
     w3 = Web3(Web3.HTTPProvider(WEB3_RPC_URL))
-    acct = w3.eth.account.from_key(PK)
+
+    try: blk = db.blocks.find_one({"_id": ObjectId(block_id)})
+    except Exception: return j({"error": "invalid block_id"}, 400)
+    if not blk: return j({"error": "block not found"}, 404)
+    if blk.get("anchor_tx"): return j({"error": "already anchored", "anchor_tx": blk["anchor_tx"]}, 400)
+
+    acct = w3.eth.account.from_key(REG_PK)
     abi = [{
       "inputs":[{"internalType":"uint256","name":"blockId","type":"uint256"},
                 {"internalType":"bytes32","name":"root","type":"bytes32"}],
       "name":"anchor","outputs":[{"internalType":"bool","name":"","type":"bool"}],
       "stateMutability":"nonpayable","type":"function"
     }]
-    contract = w3.eth.contract(address=Web3.to_checksum_address(CONTRACT), abi=abi)
-
-    # derive numeric block id safely from Mongo _id's increment (or use a counter)
-    # For demo, we just pass a small synthetic id (hash % 1e6)
+    contract = w3.eth.contract(address=Web3.to_checksum_address(ANCHOR_ADDR), abi=abi)
     synthetic_id = int(sha256_hex(str(blk["_id"]).encode())[:10], 16) % 1_000_000
     root_bytes = w3.to_bytes(hexstr=blk["merkle_root"])
-
     txn = contract.functions.anchor(synthetic_id, root_bytes).build_transaction({
         "from": acct.address,
         "nonce": w3.eth.get_transaction_count(acct.address),
@@ -647,16 +550,17 @@ def anchor_block(block_id):
         "maxPriorityFeePerGas": w3.to_wei("1", "gwei"),
         "chainId": w3.eth.chain_id
     })
-    signed = w3.eth.account.sign_transaction(txn, PK)
+    signed = w3.eth.account.sign_transaction(txn, REG_PK)
     txh = w3.eth.send_raw_transaction(signed.rawTransaction).hex()
 
     db.blocks.update_one({"_id": blk["_id"]}, {"$set": {"anchor_tx": txh}})
-    # also ledger a meta "anchor" tx (optional)
-    ledger_append("anchor", {"block_id": str(blk["_id"]), "root": blk["merkle_root"], "anchor_tx": txh})
+    # mark all credits in this block as "anchored" where applicable (only mints logically matter)
+    minted_in_block = db.ledger_txs.find({"block_id": blk["_id"], "type": "mint"})
+    for t in minted_in_block:
+        db.credits.update_one({"_id": ObjectId(t["payload"]["credit_id"])}, {"$set": {"anchor_tx": txh}})
+    ledger_append("anchor", {"block_id": block_id, "root": blk["merkle_root"], "anchor_tx": txh})
 
-    return jsonify({"anchored": True, "tx": txh})
+    return j({"anchored": True, "tx": txh})
 
-
-# ------------------- Main -------------------
 if __name__ == "__main__":
     app.run(debug=True)
