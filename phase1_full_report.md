@@ -1,6 +1,6 @@
 # Phase-1 Full Run
 - Base: `http://127.0.0.1:5000/api/v1`
-- Time: `2025-08-30T13:53:26.692898+00:00`
+- Time: `2025-08-30T15:10:22.338555+00:00`
 
 ### Health
 ```json
@@ -12,75 +12,75 @@
 ### Producer Account
 ```json
 {
-  "id": "68b30256a54f3f44a75d4ed7",
+  "id": "68b3145e3366f44b40c69a0b",
   "name": "GreenCo",
   "role": "producer",
-  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAWAf/wfHhaRu4K4pZDtjFAmw6pt5CvwTwwSO6UIV2NBM=\n-----END PUBLIC KEY-----\n",
-  "_id": "68b30256a54f3f44a75d4ed7"
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA0MDDi0kUk2/RctbGR5Ems9p4Jfr5yzicWHpXXxqKMlA=\n-----END PUBLIC KEY-----\n",
+  "_id": "68b3145e3366f44b40c69a0b"
 }
 ```
 
 ### Buyer Account
 ```json
 {
-  "id": "68b30256a54f3f44a75d4ed9",
+  "id": "68b3145e3366f44b40c69a0d",
   "name": "SteelCo",
   "role": "buyer",
-  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA/wQiqqanUG806CLmR0ejzhQVB+uFcRq1FyY6sgumQeI=\n-----END PUBLIC KEY-----\n",
-  "_id": "68b30256a54f3f44a75d4ed9"
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEABQUNa+DeJE7G2IKE+TAcUWzjGb9nxWJ249Nivl02zq0=\n-----END PUBLIC KEY-----\n",
+  "_id": "68b3145e3366f44b40c69a0d"
 }
 ```
 
 ### Sensor
 ```json
 {
-  "id": "68b30257a54f3f44a75d4edb",
+  "id": "68b3145e3366f44b40c69a0f",
   "name": "StackMeter-01",
-  "electrolyzer_id": "ELX-1756562007",
-  "owner_account_id": "68b30256a54f3f44a75d4ed7",
-  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAw1AoKCpKB1/vUyCWEmAqqdfzMoQmc3Q+AdDUVfPSIN8=\n-----END PUBLIC KEY-----\n"
+  "electrolyzer_id": "ELX-1756566623",
+  "owner_account_id": "68b3145e3366f44b40c69a0b",
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAHxBAUITq8swRMViLk2xJngBkrtEltwYOPiZn6XiIzXA=\n-----END PUBLIC KEY-----\n"
 }
 ```
 
 ### Evidence
 ```json
 {
-  "id": "68b2c0159479f4c224ec46ba",
-  "filename": "evidence_run1.csv",
+  "id": "68b313513366f44b40c69a00",
+  "filename": "evidence_full.csv",
   "sha256_hex": "867847599370d5c8021adce7b2308b7c79e1e0f9f89256475eba2b4f0f18d0c6",
-  "stored_path": "evidence\\867847599370_evidence_run1.csv",
-  "created_at": "2025-08-30T09:10:45.021000"
+  "stored_path": "evidence\\867847599370_evidence_full.csv",
+  "created_at": "2025-08-30T15:05:53.535000"
 }
 ```
 
 ### Event Canonical (Signed by Sensor)
 ```json
 {
-  "sensor_id": "68b30257a54f3f44a75d4edb",
-  "start_time": "2025-08-30T13:53:27",
-  "end_time": "2025-08-30T15:53:27",
+  "sensor_id": "68b3145e3366f44b40c69a0f",
+  "start_time": "2025-08-30T15:10:23",
+  "end_time": "2025-08-30T17:10:23",
   "energy_kwh": 1000.0,
   "hydrogen_kg": 20.0,
-  "evidence_id": "68b2c0159479f4c224ec46ba"
+  "evidence_id": "68b313513366f44b40c69a00"
 }
 ```
 
 ### Sensor Signature
-e5a5ab224cd0126a3c2be7e79626e863571108827cf4fa94991d8e10aa37425f2c9c7aa78221cf0279ca703d215f846648fcfe9be075107c1eeb459658f09909
+2a35e716e09ef8fb9b5ab7cade5a3903e91f0089dbc52e500c95404ef53cf6e83d653815758d94766aaee4a59d5cdb752e973242353dbb6a68645b6aba363b06
 
 ### Event Submitted
 ```json
 {
-  "id": "68b30257a54f3f44a75d4edd",
-  "sensor_id": "68b30257a54f3f44a75d4edb",
-  "electrolyzer_id": "ELX-1756562007",
-  "start_time": "2025-08-30T13:53:27",
-  "end_time": "2025-08-30T15:53:27",
+  "id": "68b3145f3366f44b40c69a11",
+  "sensor_id": "68b3145e3366f44b40c69a0f",
+  "electrolyzer_id": "ELX-1756566623",
+  "start_time": "2025-08-30T15:10:23",
+  "end_time": "2025-08-30T17:10:23",
   "energy_kwh": 1000.0,
   "hydrogen_kg": 20.0,
-  "evidence_id": "68b2c0159479f4c224ec46ba",
-  "payload_canonical": "{\"end_time\":\"2025-08-30T15:53:27\",\"energy_kwh\":1000.0,\"evidence_id\":\"68b2c0159479f4c224ec46ba\",\"hydrogen_kg\":20.0,\"sensor_id\":\"68b30257a54f3f44a75d4edb\",\"start_time\":\"2025-08-30T13:53:27\"}",
-  "sensor_signature_hex": "e5a5ab224cd0126a3c2be7e79626e863571108827cf4fa94991d8e10aa37425f2c9c7aa78221cf0279ca703d215f846648fcfe9be075107c1eeb459658f09909",
+  "evidence_id": "68b313513366f44b40c69a00",
+  "payload_canonical": "{\"end_time\":\"2025-08-30T17:10:23\",\"energy_kwh\":1000.0,\"evidence_id\":\"68b313513366f44b40c69a00\",\"hydrogen_kg\":20.0,\"sensor_id\":\"68b3145e3366f44b40c69a0f\",\"start_time\":\"2025-08-30T15:10:23\"}",
+  "sensor_signature_hex": "2a35e716e09ef8fb9b5ab7cade5a3903e91f0089dbc52e500c95404ef53cf6e83d653815758d94766aaee4a59d5cdb752e973242353dbb6a68645b6aba363b06",
   "signature_valid": true,
   "overlap_ok": true,
   "verified": true
@@ -90,18 +90,18 @@ e5a5ab224cd0126a3c2be7e79626e863571108827cf4fa94991d8e10aa37425f2c9c7aa78221cf02
 ### Minted (pending)
 ```json
 {
-  "credit_id": "68b30257a54f3f44a75d4edf",
+  "credit_id": "68b3145f3366f44b40c69a13",
   "amount_g": 20000,
-  "owner_account_id": "68b30256a54f3f44a75d4ed7",
+  "owner_account_id": "68b3145e3366f44b40c69a0b",
   "status": "pending",
-  "tx_hash": "e465dc7ba7cc16d09bd708d0c8dd05fca78d774971a8cff188719be63de3f31d"
+  "tx_hash": "6e03f61761b14e790f94edc48f15dc102e753ab47d1a8570e4f3ff0c5ef7487a"
 }
 ```
 
 ### Producer Balance (pre)
 ```json
 {
-  "account_id": "68b30256a54f3f44a75d4ed7",
+  "account_id": "68b3145e3366f44b40c69a0b",
   "balance_g": 20000,
   "balance_kg": 20.0
 }
@@ -110,7 +110,7 @@ e5a5ab224cd0126a3c2be7e79626e863571108827cf4fa94991d8e10aa37425f2c9c7aa78221cf02
 ### Buyer Balance (pre)
 ```json
 {
-  "account_id": "68b30256a54f3f44a75d4ed9",
+  "account_id": "68b3145e3366f44b40c69a0d",
   "balance_g": 0,
   "balance_kg": 0.0
 }
@@ -119,177 +119,13 @@ e5a5ab224cd0126a3c2be7e79626e863571108827cf4fa94991d8e10aa37425f2c9c7aa78221cf02
 ### Transfer Canonical
 ```json
 {
-  "credit_id": "68b30257a54f3f44a75d4edf",
-  "from_account_id": "68b30256a54f3f44a75d4ed7",
-  "to_account_id": "68b30256a54f3f44a75d4ed9",
+  "credit_id": "68b3145f3366f44b40c69a13",
+  "from_account_id": "68b3145e3366f44b40c69a0b",
+  "to_account_id": "68b3145e3366f44b40c69a0d",
   "amount_g": 5000
 }
 ```
 
 ### Transfer Signature (producer)
-4d86cf242f62855109c3fc5bc25cc82259aed956e7d72a5688e8921d839845fab870574381bf289a713fc3c439cba54a05dd26ff70d92e64a28e95491c208d0f
-
-### Transfer Result
-```json
-{
-  "ok": true,
-  "to_credit_id": "68b30258a54f3f44a75d4ee1",
-  "tx_hash": "0406e6604ee3d50afdec5457fad091fe4506123e1a7ed54792abce2b4f2d7d17"
-}
-```
-
-### Retire Canonical
-```json
-{
-  "credit_id": "68b30258a54f3f44a75d4ee1",
-  "owner_account_id": "68b30256a54f3f44a75d4ed9",
-  "amount_g": 3000,
-  "reason": "green steel batch A"
-}
-```
-
-### Retire Signature (buyer)
-c2b78b4545895b912210d9efaa0de175280cb6d50dcb3627cd529a6e158d87e1e3b36f8357ff214428f9d7c7bde1ef88735754ad9f2b100394a283be5ebc1d09
-
-### Retire Result
-```json
-{
-  "ok": true,
-  "retired_from_credit_id": "68b30258a54f3f44a75d4ee1",
-  "amount_g": 3000,
-  "tx_hash": "119f5d1efe6fa4d5959b1b1d55f82b99c0d2f4eb2cde20ab8304920d76f5ae47"
-}
-```
-
-### Producer Balance (post)
-```json
-{
-  "account_id": "68b30256a54f3f44a75d4ed7",
-  "balance_g": 15000,
-  "balance_kg": 15.0
-}
-```
-
-### Buyer Balance (post)
-```json
-{
-  "account_id": "68b30256a54f3f44a75d4ed9",
-  "balance_g": 2000,
-  "balance_kg": 2.0
-}
-```
-
-### Block Closed (Merkle)
-```json
-{
-  "block_id": "68b30259a54f3f44a75d4ee5",
-  "merkle_root": "4c755cd890bb714a854626173e7787f2943f1e4099601238dd8ed535a6698a4e",
-  "tx_count": 7,
-  "chain_hash": "2dbe0b0d900e5334e762c4c2c035461240fb9d42035601cc557f1137518d0dda"
-}
-```
-
-### Latest Block
-```json
-{
-  "block_id": "68b30259a54f3f44a75d4ee5",
-  "prev_hash": null,
-  "merkle_root": "4c755cd890bb714a854626173e7787f2943f1e4099601238dd8ed535a6698a4e",
-  "chain_hash": "2dbe0b0d900e5334e762c4c2c035461240fb9d42035601cc557f1137518d0dda",
-  "tx_count": 7,
-  "created_at": "2025-08-30T13:53:29.597000",
-  "anchor_tx": null
-}
-```
-
-### Anchor Skipped
-```json
-{
-  "reason": "TRY_ANCHOR not set or no block"
-}
-```
-
-### All Events
-```json
-[
-  {
-    "id": "68b30257a54f3f44a75d4edd",
-    "sensor_id": "68b30257a54f3f44a75d4edb",
-    "electrolyzer_id": "ELX-1756562007",
-    "start_time": "2025-08-30T13:53:27",
-    "end_time": "2025-08-30T15:53:27",
-    "energy_kwh": 1000.0,
-    "hydrogen_kg": 20.0,
-    "evidence_id": "68b2c0159479f4c224ec46ba",
-    "signature_valid": true,
-    "overlap_ok": true,
-    "verified": true
-  },
-  {
-    "id": "68b300bd637cd1bc1a07e0b5",
-    "sensor_id": "68b300bc637cd1bc1a07e0b4",
-    "electrolyzer_id": "ELX-001",
-    "start_time": "2025-08-29T10:00:00",
-    "end_time": "2025-08-29T12:00:00",
-    "energy_kwh": 1000.0,
-    "hydrogen_kg": 20.0,
-    "evidence_id": "68b2c0159479f4c224ec46ba",
-    "signature_valid": true,
-    "overlap_ok": false,
-    "verified": false
-  },
-  {
-    "id": "68b2ff4962fbb57863ad7216",
-    "sensor_id": "68b2ff4862fbb57863ad7215",
-    "electrolyzer_id": "ELX-001",
-    "start_time": "2025-08-29T10:00:00",
-    "end_time": "2025-08-29T12:00:00",
-    "energy_kwh": 1000.0,
-    "hydrogen_kg": 20.0,
-    "evidence_id": "68b2c0159479f4c224ec46ba",
-    "signature_valid": true,
-    "overlap_ok": false,
-    "verified": false
-  },
-  {
-    "id": "68b2ff31ccbb034dda5534e5",
-    "sensor_id": "68b2ff31ccbb034dda5534e4",
-    "electrolyzer_id": "ELX-001",
-    "start_time": "2025-08-29T10:00:00",
-    "end_time": "2025-08-29T12:00:00",
-    "energy_kwh": 1000.0,
-    "hydrogen_kg": 20.0,
-    "evidence_id": "68b2c0159479f4c224ec46ba",
-    "signature_valid": true,
-    "overlap_ok": false,
-    "verified": false
-  },
-  {
-    "id": "68b2c4ba7a30392ec22b04f4",
-    "sensor_id": "68b2c4ba7a30392ec22b04f3",
-    "electrolyzer_id": "ELX-001",
-    "start_time": "2025-08-29T10:00:00",
-    "end_time": "2025-08-29T12:00:00",
-    "energy_kwh": 1000.0,
-    "hydrogen_kg": 20.0,
-    "evidence_id": "68b2c0159479f4c224ec46ba",
-    "signature_valid": true,
-    "overlap_ok": false,
-    "verified": false
-  },
-  {
-    "id": "68b2c0159479f4c224ec46bb",
-    "sensor_id": "68b2c0149479f4c224ec46b9",
-    "electrolyzer_id": "ELX-001",
-    "start_time": "2025-08-29T10:00:00",
-    "end_time": "2025-08-29T12:00:00",
-    "energy_kwh": 1000.0,
-    "hydrogen_kg": 20.0,
-    "evidence_id": "68b2c0159479f4c224ec46ba",
-    "signature_valid": true,
-    "overlap_ok": true,
-    "verified": true
-  }
-]
-```
+d0e6e87724f5304adee2b6373a617dc0307986e8aaa527c549f7dbe1405aedd60f7458bad59d0c1e6c3a4005d7c76c6e3d83653840aad7975a7b80df80b88e05
 

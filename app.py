@@ -27,6 +27,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives import serialization
 from cryptography.exceptions import InvalidSignature
 
+
+from utils import *
 # ---------------- Config ----------------
 load_dotenv()
 MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
@@ -36,7 +38,7 @@ os.makedirs(EVIDENCE_DIR, exist_ok=True)
 
 # Optional chain env
 WEB3_RPC_URL = os.getenv("WEB3_RPC_URL")
-REG_PK       = os.getenv("REGISTRY_PRIVATE_KEY")
+REG_PK       = os.getenv("PRIVATE_KEY")
 ANCHOR_ADDR  = os.getenv("ANCHOR_CONTRACT_ADDRESS")
 
 client = MongoClient(MONGODB_URI)
@@ -135,10 +137,14 @@ def close_block(note: Optional[str] = None) -> dict:
         "tx_count": len(pending),
         "note": note,
         "created_at": datetime.utcnow(),
-        "anchor_tx": None
+        "anchor_tx": None,
+        "contract_address": ANCHOR_ADDR,
+        # "onchain_block_id": 
     }
     res = db.blocks.insert_one(blk)
     block_id = res.inserted_id
+    onchain_block_id = int(hashlib.sha256(str(block_id).encode()).hexdigest(), 16) % (2**256)   
+    db.blocks.update_one({"_id": block_id}, {"$set": {"onchain_block_id": str(onchain_block_id)}})
     db.ledger_txs.update_many({"_id": {"$in": [p["_id"] for p in pending]}},
                               {"$set": {"block_id": block_id}})
 
@@ -562,5 +568,100 @@ def anchor_block(block_id):
 
     return j({"anchored": True, "tx": txh})
 
+
+
+
+########################################################### anchor blocks
+from flask import abort
+import math
+
+# helper: recompute merkle root for txs in a block
+def compute_merkle_root(tx_hashes):
+    if not tx_hashes:
+        return None
+    layer = tx_hashes[:]
+    while len(layer) > 1:
+        nxt = []
+        for i in range(0, len(layer), 2):
+            left = layer[i]
+            right = layer[i] if i + 1 == len(layer) else layer[i+1]
+            concat = (left + right).encode()
+            nxt.append(hashlib.sha256(concat).hexdigest())
+        layer = nxt
+    return layer[0]
+
+# helper: build merkle proof for a tx
+def build_merkle_proof(tx_hashes, target):
+    if target not in tx_hashes:
+        return None
+    proof = []
+    idx = tx_hashes.index(target)
+    layer = tx_hashes[:]
+    while len(layer) > 1:
+        nxt = []
+        for i in range(0, len(layer), 2):
+            left = layer[i]
+            right = layer[i] if i + 1 == len(layer) else layer[i+1]
+            pair_hash = hashlib.sha256((left + right).encode()).hexdigest()
+            nxt.append(pair_hash)
+            if i == idx or i+1 == idx:
+                is_right = (i == idx)
+                sibling = right if i == idx else left
+                proof.append({"sibling": sibling, "is_right": is_right})
+                idx = len(nxt)-1
+        layer = nxt
+    return proof
+
+@app.get("/api/v1/blocks/<block_id>")
+def get_block(block_id):
+    block = db.blocks.find_one({"_id": ObjectId(block_id)})
+    if not block:
+        return j({"error": "block not found"}), 404
+    block["id"] = str(block["_id"])
+    block.pop("_id")
+    return j(block)
+
+@app.get("/api/v1/blocks/<block_id>/txs")
+def get_block_txs(block_id):
+    block = db.blocks.find_one({"_id": ObjectId(block_id)})
+    if not block:
+        return j({"error": "block not found"}), 404
+    txs = list(db.txs.find({"block_id": block_id}).sort("created_at", 1))
+    out = [{"tx_hash": t["tx_hash"], "type": t.get("type","")} for t in txs]
+    return j({
+        "block_id": block_id,
+        "order": "created_at_asc",
+        "hash_algo": "sha256",
+        "merkle_concat": "left||right, duplicate last if odd",
+        "txs": out
+    })
+
+@app.get("/api/v1/proof/tx/<tx_hash>")
+def get_tx_proof(tx_hash):
+    tx = db.ledger_txs.find_one({"tx_hash": tx_hash})
+    if not tx:
+        return j({"error": "tx not found"}), 404
+    block_id = tx["block_id"]
+    block = db.blocks.find_one({"_id": ObjectId(block_id)})
+    if not block:
+        return j({"error": "block not found"}), 404
+
+    txs = list(db.ledger_txs.find({"block_id": block_id}).sort("created_at", 1))
+    tx_hashes = [t["tx_hash"] for t in txs]
+    proof = build_merkle_proof(tx_hashes, tx_hash)
+    root = compute_merkle_root(tx_hashes)
+
+    return j({
+        "block_id": block_id,
+        "onchain_block_id": block.get("onchain_block_id"),
+        "tx_hash": tx_hash,
+        "index": tx_hashes.index(tx_hash),
+        "hashes_count": len(tx_hashes),
+        "proof": proof,
+        "merkle_root": root,
+        "anchor_tx": block.get("anchor_tx"),
+        "contract_address": block.get("contract_address"),
+        "chain": block.get("chain", "sepolia")
+    })
 if __name__ == "__main__":
     app.run(debug=True)
