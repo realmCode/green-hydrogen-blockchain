@@ -72,6 +72,31 @@ app = Flask(__name__)
 # --------------- JSON helper ---------------
 def j(data, status=200):
     return Response(json.dumps(data, default=str), status=status, mimetype="application/json")
+# --- helpers (top of app.py or helpers section) ---
+from datetime import datetime, timezone
+from bson import ObjectId
+
+def to_public(x):
+    """Recursively convert ObjectId and datetime to JSON-safe values."""
+    if isinstance(x, dict):
+        return {k: to_public(v) for k, v in x.items()}
+    if isinstance(x, list):
+        return [to_public(v) for v in x]
+    try:
+        from bson import ObjectId as _OID
+        if isinstance(x, _OID):
+            return str(x)
+    except Exception:
+        pass
+    if isinstance(x, datetime):
+        return x.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return x
+
+def j_ok(payload, code=200):
+    return j(to_public(payload)), code
+
+def j_err(msg, code=400):
+    return j({"error": msg}), code
 
 # --------------- Helpers ---------------
 def sha256_hex(b: bytes) -> str:
@@ -134,7 +159,10 @@ def ledger_append(tx_type: str, payload: dict) -> str:
     return th
 
 def close_block(note: Optional[str] = None) -> dict:
-    pending = list(db.ledger_txs.find({"block_id": None}).sort("created_at", 1))
+    # 1) collect pending txs (handle both None and missing field)
+    pending = list(db.ledger_txs.find({
+        "$or": [{"block_id": None}, {"block_id": {"$exists": False}}]
+    }).sort("created_at", 1))
     if not pending:
         return {"error": "no pending txs to close"}
 
@@ -145,7 +173,7 @@ def close_block(note: Optional[str] = None) -> dict:
     prev_hash = prev["merkle_root"] if prev else None
     chain_hash = sha256_hex(((prev_hash or "") + root).encode("utf-8"))
 
-    # create block doc first to get its ObjectId
+    # 2) create block doc first (we need block_id)
     blk_doc = {
         "prev_hash": prev_hash,
         "merkle_root": root,
@@ -160,23 +188,27 @@ def close_block(note: Optional[str] = None) -> dict:
     res = db.blocks.insert_one(blk_doc)
     block_id = res.inserted_id
 
-    # compute and store onchain_block_id (uint256) deterministically
+    # 3) deterministically derive on-chain id and store it
     onchain_block_id = derive_onchain_block_id(str(block_id))
     db.blocks.update_one({"_id": block_id}, {"$set": {"onchain_block_id": str(onchain_block_id)}})
 
-    # attach block_id to all pending txs
+    # 4) attach block_id to all pending txs
     db.ledger_txs.update_many(
         {"_id": {"$in": [p["_id"] for p in pending]}},
         {"$set": {"block_id": block_id}}
     )
 
-    # domain: finalize credits in this block (issue mints)
-    for p in pending:
-        if p["type"] == "mint":
-            cid = ObjectId(p["payload"]["credit_id"])
-            db.credits.update_one({"_id": cid}, {"$set": {"status": "issued", "block_id": block_id}})
+    # 5) domain: flip minted credits in THIS block to ACTIVE
+    activated_mints: list[str] = []
+    for tx in db.ledger_txs.find({"block_id": block_id, "type": "mint"}):
+        cid = tx["payload"]["credit_id"]
+        activated_mints.append(cid)
+        db.credits.update_one(
+            {"_id": ObjectId(cid)},
+            {"$set": {"status": "active", "block_id": block_id}}
+        )
 
-    # --- Auto-anchor if chain env is present ---
+    # 6) optional: anchor to chain if env present
     anchored = False
     anchor_txh = None
     if WEB3_RPC_URL and REG_PK and ANCHOR_ADDR:
@@ -192,29 +224,71 @@ def close_block(note: Optional[str] = None) -> dict:
             }]
             contract = w3.eth.contract(address=Web3.to_checksum_address(ANCHOR_ADDR), abi=abi)
             root_bytes = w3.to_bytes(hexstr=root)
-            tx = contract.functions.anchor(onchain_block_id, root_bytes).build_transaction({
-                "from": acct.address,
-                "nonce": w3.eth.get_transaction_count(acct.address),
-                "gas": 200000,
-                "maxFeePerGas": w3.to_wei("20", "gwei"),
-                "maxPriorityFeePerGas": w3.to_wei("1", "gwei"),
-                "chainId": w3.eth.chain_id,
-            })
-            signed = w3.eth.account.sign_transaction(tx, REG_PK)
-            txh = w3.eth.send_raw_transaction(_signed_raw_bytes(signed))
-            anchor_txh = txh.hex() if hasattr(txh, "hex") else txh
+            # tx = contract.functions.anchor(onchain_block_id, root_bytes).build_transaction({
+            #     "from": acct.address,
+            #     "nonce": w3.eth.get_transaction_count(acct.address),
+            #     "gas": 200000,
+            #     "maxFeePerGas": w3.to_wei("20", "gwei"),
+            #     "maxPriorityFeePerGas": w3.to_wei("1", "gwei"),
+            #     "chainId": w3.eth.chain_id,
+            # })
+            # signed = w3.eth.account.sign_transaction(tx, REG_PK)
 
-            db.blocks.update_one({"_id": block_id}, {"$set": {"anchor_tx": anchor_txh}})
-            # mark minted credits in this block as anchored
-            minted_in_block = db.ledger_txs.find({"block_id": block_id, "type": "mint"})
-            for t in minted_in_block:
-                db.credits.update_one({"_id": ObjectId(t["payload"]["credit_id"])},
-                                      {"$set": {"anchor_tx": anchor_txh}})
-            ledger_append("anchor", {"block_id": str(block_id), "root": root, "anchor_tx": anchor_txh})
+            # # handle web3 SignedTransaction attr names across versions
+            # raw = getattr(signed, "rawTransaction", None) or getattr(signed, "raw_transaction", None)
+            # if raw is None:
+            #     raw = signed  # fallback if provider already returns raw bytes
+
+            # txh = w3.eth.send_raw_transaction(raw)
+            # anchor_txh = txh.hex() if hasattr(txh, "hex") else str(txh)
+
+            # # persist on the block
+            # db.blocks.update_one({"_id": block_id}, {"$set": {"anchor_tx": anchor_txh}})
+
+            # # mark ALL txs in this block as anchored (so reports show anchored:true)
+            # db.ledger_txs.update_many(
+            #     {"block_id": block_id},
+            #     {"$set": {"anchored": True, "anchor_tx": anchor_txh}}
+            # )
+
+            # # (optional) for convenience, also stamp minted credits with anchor_tx
+            # for t in db.ledger_txs.find({"block_id": block_id, "type": "mint"}):
+            #     db.credits.update_one(
+            #         {"_id": ObjectId(t["payload"]["credit_id"])},
+            #         {"$set": {"anchor_tx": anchor_txh}}
+            #     )
+
+            # # add an anchor marker into the ledger (itself will go into the next block)
+            # ledger_append("anchor", {
+            #     "block_id": str(block_id),
+            #     "root": root,
+            #     "anchor_tx": anchor_txh,
+            #     "anchored": True
+            # })
+
+            # anchored = True
+            ### edit
+            from utils import send_anchor_with_bump
+            txh_hex = send_anchor_with_bump(
+                w3=w3,
+                acct=acct,
+                contract=contract,
+                onchain_block_id=onchain_block_id,
+                root_bytes=root_bytes,
+                chain_id=w3.eth.chain_id,
+                attempts=4,
+                wait_receipt=False  # or True if you want to block until mined
+            )
+
+            db.blocks.update_one({"_id": block_id}, {"$set": {"anchor_tx": txh_hex}})
+            db.ledger_txs.update_many({"block_id": block_id}, {"$set": {"anchored": True, "anchor_tx": txh_hex}})
+            for t in db.ledger_txs.find({"block_id": block_id, "type": "mint"}):
+                db.credits.update_one({"_id": ObjectId(t["payload"]["credit_id"])}, {"$set": {"anchor_tx": txh_hex}})
+            ledger_append("anchor", {"block_id": str(block_id), "root": root, "anchor_tx": txh_hex, "anchored": True})
             anchored = True
+            # end edit
         except Exception as e:
-            # don’t fail block close if anchoring fails; just return the error
-            anchor_txh = f"ERROR: {e}"
+            anchor_txh = f"ERROR: {e}"  # do not fail the block close
 
     return {
         "block_id": str(block_id),
@@ -224,7 +298,8 @@ def close_block(note: Optional[str] = None) -> dict:
         "chain_hash": chain_hash,
         "contract_address": ANCHOR_ADDR,
         "anchored": anchored,
-        "anchor_tx": anchor_txh
+        "anchor_tx": anchor_txh,
+        "activated_mints": activated_mints,
     }
 
 # --------------- Routes (prefix: /api/v1) ---------------
@@ -457,16 +532,26 @@ def mint_credits():
               "status": "pending", "tx_hash": th})
 
 @app.get("/api/v1/accounts/<account_id>/balance")
-def get_balance(account_id):
-    try: acc = db.accounts.find_one({"_id": ObjectId(account_id)})
-    except Exception: return j({"error": "invalid account_id"}, 400)
-    if not acc: return j({"error": "account not found"}, 404)
-    agg = list(db.credits.aggregate([
-        {"$match": {"owner_account_id": acc["_id"], "status": {"$ne": "retired"}}},
+def get_balance(account_id: str):
+    from bson import ObjectId
+    try:
+        acc_oid = ObjectId(account_id)
+    except Exception:
+        acc_oid = None
+
+    owner_match = {"$in": [account_id, acc_oid]} if acc_oid else account_id
+
+    pipeline = [
+        {"$match": {
+            "owner_account_id": owner_match,
+            "status": {"$in": ["active", "issued"]},   # ✅ count both active + issued
+            "amount_g": {"$gt": 0}
+        }},
         {"$group": {"_id": None, "g": {"$sum": "$amount_g"}}}
-    ]))
-    g = int(agg[0]["g"]) if agg else 0
-    return j({"account_id": account_id, "balance_g": g, "balance_kg": g/1000.0})
+    ]
+    res = list(db.credits.aggregate(pipeline))
+    g = int(res[0]["g"]) if res else 0
+    return j({"account_id": account_id, "balance_g": g, "balance_kg": g / 1000.0})
 
 @app.post("/api/v1/credits/transfer")
 def transfer_credit():
@@ -485,7 +570,7 @@ def transfer_credit():
         return j({"error": "credit_id, from_account_id, to_account_id, amount_g, owner_signature_hex required"}, 400)
 
     try:
-        cred = db.credits.find_one({"_id": ObjectId(credit_id)})
+        cred = db.credits.find_one({"_id": ObjectId(credit_id), "status": "active"})
         from_acc = db.accounts.find_one({"_id": ObjectId(from_id)})
         to_acc   = db.accounts.find_one({"_id": ObjectId(to_id)})
     except Exception:
@@ -791,5 +876,177 @@ def v2_state_proof_compressed(account_id):
         "meta": {"skipped_defaults": 256 - len(compact)}
     })
 
+
+###############################     phase 3 market phase
+@app.post("/api/v1/market/offers")
+def market_create_offer():
+    data = request.get_json(force=True, silent=True) or {}
+    producer_id = data.get("producer_id")     # stringified account _id
+    credit_id   = data.get("credit_id")       # stringified credit _id
+    amount_g    = int(data.get("amount_g", 0))
+    price_per_g = float(data.get("price_per_g", 0))
+
+    if not producer_id or not credit_id or amount_g <= 0 or price_per_g <= 0:
+        return j_err("producer_id, credit_id, amount_g>0, price_per_g>0 required")
+
+    credit = db.credits.find_one({"_id": ObjectId(credit_id)})
+    if not credit:
+        return j_err("credit not found", 404)
+
+    if str(credit.get("owner_account_id")) != producer_id:
+        return j_err("not credit owner", 403)
+
+    status = credit.get("status")
+    if status in ["retired", "pending"]:
+        return j_err(f"credit status not sellable: {status}")
+
+    locked   = int(credit.get("locked_g", 0))
+    available= int(credit.get("amount_g", 0)) - locked
+    if amount_g > available:
+        return j_err(f"insufficient available: {available}g")
+
+    # atomic reservation (prevent oversell)
+    res = db.credits.update_one(
+        {
+            "_id": credit["_id"],
+            "$or": [{"locked_g": locked}, {"locked_g": {"$exists": False}}]
+        },
+        {"$set": {"locked_g": locked + amount_g}}
+    )
+    if res.modified_count != 1:
+        return j_err("reservation failed (concurrent change)")
+
+    offer_doc = {
+        "producer_id": producer_id,
+        "credit_id": credit_id,
+        "amount_g": int(amount_g),
+        "price_per_g": float(price_per_g),
+        "created_at": datetime.now(timezone.utc),
+        "status": "open"
+    }
+    ins = db.market_offers.insert_one(offer_doc)
+
+    # optional: append to ledger_txs so it’s included in the next block root
+    ledger_append("market_list", {
+        "offer_id": str(ins.inserted_id),
+        "producer_id": producer_id,
+        "credit_id": credit_id,
+        "amount_g": int(amount_g),
+        "price_per_g": float(price_per_g)
+    })
+
+    out = {**offer_doc, "id": str(ins.inserted_id)}
+    return j_ok(out, 201)
+
+@app.get("/api/v1/market/offers")
+def market_list_offers():
+    q = {"status": "open"}
+    producer_id = request.args.get("producer_id")
+    credit_id   = request.args.get("credit_id")
+    if producer_id: q["producer_id"] = producer_id
+    if credit_id:   q["credit_id"] = credit_id
+    offers = list(db.market_offers.find(q).sort("created_at", -1))
+    return j_ok({"offers": offers})
+@app.get("/api/v1/market/offers/<offer_id>")
+def market_get_offer(offer_id):
+    o = db.market_offers.find_one({"_id": ObjectId(offer_id)})
+    if not o: return j_err("offer not found", 404)
+    return j_ok(o)
+@app.post("/api/v1/market/buy")
+def market_buy():
+    data = request.get_json(force=True, silent=True) or {}
+    buyer_id = data.get("buyer_id")
+    offer_id = data.get("offer_id")
+    amount_g = int(data.get("amount_g", 0))
+
+    if not buyer_id or not offer_id or amount_g <= 0:
+        return j_err("buyer_id, offer_id, amount_g>0 required")
+
+    offer = db.market_offers.find_one({"_id": ObjectId(offer_id)})
+    if not offer:
+        return j_err("offer not found", 404)
+    if offer.get("status") != "open":
+        return j_err("offer closed")
+
+    if amount_g > int(offer["amount_g"]):
+        return j_err(f"exceeds available in offer: {offer['amount_g']}g")
+
+    credit = db.credits.find_one({"_id": ObjectId(offer["credit_id"])})
+    if not credit:
+        return j_err("linked credit missing", 404)
+
+    # atomic decrement of amount and lock
+    upd = db.credits.update_one(
+        {
+            "_id": credit["_id"],
+            "amount_g": {"$gte": amount_g},
+            "$or": [
+                {"locked_g": {"$exists": False}},
+                {"locked_g": {"$gte": amount_g}}
+            ]
+        },
+        {"$inc": {"amount_g": -amount_g, "locked_g": -amount_g}}
+    )
+    if upd.modified_count != 1:
+        return j_err("not enough locked or amount changed concurrently")
+
+    # issue buyer credit
+    buyer_credit = {
+        "amount_g": int(amount_g),
+        "owner_account_id": ObjectId(buyer_id),   # <-- ObjectId to match schema
+        "status": "issued",
+        "from_offer": offer_id,
+        "source_credit_id": str(credit["_id"]),
+        "created_at": datetime.now(timezone.utc)
+    }
+    buyer_credit_id = db.credits.insert_one(buyer_credit).inserted_id
+
+    # adjust or close offer
+    offer_left = int(offer["amount_g"]) - amount_g
+    new_status = "closed" if offer_left == 0 else "open"
+    db.market_offers.update_one(
+        {"_id": offer["_id"]},
+        {"$set": {"amount_g": offer_left, "status": new_status}}
+    )
+
+    # append to ledger so buy hits the next block root
+    ledger_append("market_buy", {
+        "buyer_id": buyer_id,
+        "producer_id": offer["producer_id"],
+        "offer_id": offer_id,
+        "new_credit_id": str(buyer_credit_id),
+        "amount_g": int(amount_g),
+        "price_per_g": float(offer["price_per_g"])
+    })
+
+    return j_ok({
+        "ok": True,
+        "new_credit_id": str(buyer_credit_id),
+        "offer_left": offer_left,
+        "offer_status": new_status
+    }, 201)
+@app.get("/api/v1/reports/retirements")
+def report_retirements():
+    # from Phase-1 you already record retire txs in ledger_txs
+    cur = db.ledger_txs.find({"type": "retire"}).sort("created_at", -1)
+
+    out = []
+    for r in cur:
+        p = r.get("payload", {})
+        out.append({
+            "credit_id": p.get("credit_id"),
+            "owner_account_id": p.get("owner_account_id"),
+            "amount_g": p.get("amount_g"),
+            "reason": p.get("reason"),
+            "tx_hash": r.get("tx_hash"),
+            "block_id": str(r.get("block_id", "")),
+            "anchored": bool(r.get("anchored", False)),
+            "timestamp": to_public(r.get("created_at"))
+        })
+    return j_ok({"retirements": out})
+
 if __name__ == "__main__":
     app.run(debug=True)
+
+
+# python phase3/market_demo.py   --base http://127.0.0.1:5000/api/v1   --producer 68b327fc742e3da17f4013a5   --buyer    68b327fd742e3da17f4013a7   --credit   68b327ff742e3da17f4013af   --offer-amount 5000   --buy1 2000   --buy2 3000
