@@ -81,9 +81,9 @@ def upload_file(base, path, filename: str, content: bytes, ok=200):
 
 def main():
     ap = argparse.ArgumentParser(description="Full E2E tester (Phase-1/2/3)")
-    ap.add_argument("--base", required=True, help="API base, e.g. http://127.0.0.1:5000")
-    ap.add_argument("--rpc", help="Ethereum RPC (optional)")
-    ap.add_argument("--contract", help="Anchor contract address (optional)")
+    ap.add_argument("--base", default="http://127.0.0.1:5000/", help="API base, e.g. http://127.0.0.1:5000")
+    ap.add_argument("--rpc", default=os.environ.get("WEB3_RPC_URL"),help="Ethereum RPC (optional)")
+    ap.add_argument("--contract", default=os.environ.get("ANCHOR_CONTRACT_ADDRESS"),help="Anchor contract address (optional)")
     ap.add_argument("--anchor-state", action="store_true", help="Call /api/v2/state/anchor on server")
     args = ap.parse_args()
 
