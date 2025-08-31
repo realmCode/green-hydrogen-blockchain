@@ -66,8 +66,13 @@ def _fetch_balances():
     for row in agg:
         balances[str(row["_id"])] = int(row["g"])
     return balances
-
+from flask_cors import CORS
 app = Flask(__name__)
+CORS(app)
+
+
+from app_keys_blueprint import bp_keys
+app.register_blueprint(bp_keys)
 
 # --------------- JSON helper ---------------
 def j(data, status=200):
@@ -632,6 +637,7 @@ def retire_credit():
         return j({"error": "invalid id(s)"}, 400)
     if not cred: return j({"error": "credit not found"}, 404)
     if not owner: return j({"error": "owner account not found"}, 404)
+    print(cred["owner_account_id"],owner["_id"] )
     if str(cred["owner_account_id"]) != str(owner["_id"]): return j({"error": "not owner"}, 400)
     if cred["status"] == "retired": return j({"error": "already retired"}, 400)
     if amount_g <= 0 or amount_g > int(cred["amount_g"]): return j({"error": "invalid amount_g"}, 400)
@@ -1046,7 +1052,7 @@ def report_retirements():
     return j_ok({"retirements": out})
 
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=80)
+    app.run(debug=True, host="0.0.0.0", port=5000)
 
 
 # python phase3/market_demo.py   --base http://127.0.0.1:5000/api/v1   --producer 68b327fc742e3da17f4013a5   --buyer    68b327fd742e3da17f4013a7   --credit   68b327ff742e3da17f4013af   --offer-amount 5000   --buy1 2000   --buy2 3000

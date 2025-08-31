@@ -1,0 +1,2 @@
+record_id,electrolyzer_id,sensor_id,start_time_utc,end_time_utc,energy_kwh,hydrogen_kg,ambient_temp_c,pressure_bar,operator,sensor_reading_ok,notes
+REC-001,EL-2024-999,68b4066732ab71f6d4d48682,2025-08-31T07:19:00.000000,2025-08-31T08:19:00.000000,1000.0,20.0,25.2,30.4,demo-bot,true,"single-interval aggregation"
