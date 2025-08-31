@@ -100,12 +100,6 @@ python api_tester.py --base http://127.0.0.1:5000
 ```
 - Full verification including **on-chain anchor** (if RPC/contract provided)
 
-### 3. Pretty Output (optional)
-```bash
-python api_tester_pretty.py --base http://127.0.0.1:5000
-```
-- Compact JSON previews + recap  
-
 ---
 
 ## 🔑 Core API Endpoints
