@@ -1,0 +1,7 @@
+cryptography==45.0.6
+Flask==3.1.2
+pymongo==4.14.1
+python-dotenv==1.1.1
+Requests==2.32.5
+web3==7.13.0
+Werkzeug==3.1.3

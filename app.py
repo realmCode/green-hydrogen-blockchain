@@ -1046,7 +1046,7 @@ def report_retirements():
     return j_ok({"retirements": out})
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=True, host="0.0.0.0", port=80)
 
 
 # python phase3/market_demo.py   --base http://127.0.0.1:5000/api/v1   --producer 68b327fc742e3da17f4013a5   --buyer    68b327fd742e3da17f4013a7   --credit   68b327ff742e3da17f4013af   --offer-amount 5000   --buy1 2000   --buy2 3000
