@@ -142,6 +142,7 @@ python api_tester.py --base http://127.0.0.1:5000
 ---
 
 ## 📖 License
+```
 Copyright (c) 2025 Nandish Chauhan (realmCode)
 
 All rights reserved.
@@ -153,7 +154,8 @@ Commercial use, redistribution, modification, or creation of derivative works
 is strictly prohibited without explicit written permission from the author.
 
 For licensing inquiries, please contact: 202451040@iiitvadodara.ac.in.
+```
 ---
 
 ## 🌐 Repository
-👉 [GitHub Repo](https://github.com/realmCode/hackout)
+👉 [Front End](https://github.com/realmCode/carbon-chain-ui) It's buggy.
