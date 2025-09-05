@@ -142,8 +142,17 @@ python api_tester.py --base http://127.0.0.1:5000
 ---
 
 ## 📖 License
-MIT (or specify your hackathon license)
+Copyright (c) 2025 Nandish Chauhan (realmCode)
 
+All rights reserved.
+
+Permission is hereby granted to view this repository and its source code 
+for educational and reference purposes only.
+
+Commercial use, redistribution, modification, or creation of derivative works 
+is strictly prohibited without explicit written permission from the author.
+
+For licensing inquiries, please contact: 202451040@iiitvadodara.ac.in.
 ---
 
 ## 🌐 Repository
